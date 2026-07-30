@@ -322,14 +322,15 @@
   // Claude API는 이미지가 너무 크면 자동으로 축소해서 처리하는데, 표 하나에 행이
   // 많으면 그 과정에서 작은 글씨가 뭉개져 이름/번호를 잘못 읽는 원인이 된다.
   // 세로로 여러 조각(타일)으로 잘라 조각당 픽셀 수를 줄이면 축소 없이 원본 그대로 읽힌다.
-  const TILE_MAX_PIXELS = 900000;
-  const TILE_OVERLAP_RATIO = 0.25;
+  const TILE_MAX_PIXELS = 2400000;
+  const TILE_OVERLAP_RATIO = 0.4;
+  const TILE_MIN_HEIGHT = 700; // 표 한 줄보다 훨씬 크게 잡아, 조각 경계에서 줄이 잘리지 않도록 함
 
   async function sliceImageIntoTiles(file) {
     const bitmap = await createImageBitmap(file);
     const { width, height } = bitmap;
     let tileHeight = Math.floor(TILE_MAX_PIXELS / width);
-    tileHeight = Math.max(300, Math.min(tileHeight, height));
+    tileHeight = Math.max(TILE_MIN_HEIGHT, Math.min(tileHeight, height));
     if (tileHeight >= height) return [file];
 
     const overlap = Math.floor(tileHeight * TILE_OVERLAP_RATIO);
@@ -360,6 +361,7 @@
     try {
       els.extractStatus.textContent = "이미지 분할 중...";
       const tiles = await sliceImageIntoTiles(file);
+      console.log(`[추출] 원본 ${file.name}: ${tiles.length}개 조각으로 분할`);
       const existingKeys = new Set(rows.map((r) => dedupeKey(r.name, r.digits)));
       const newRows = [];
       let skipped = 0;
@@ -367,7 +369,7 @@
 
       for (let i = 0; i < tiles.length; i++) {
         els.extractStatus.textContent = tiles.length > 1
-          ? `표 읽는 중... (${i + 1}/${tiles.length} 조각)`
+          ? `표 읽는 중... (${i + 1}/${tiles.length} 조각, 총 ${tiles.length}조각)`
           : "표 읽는 중... (몇 초~수십 초 걸릴 수 있습니다)";
         const imageBase64 = await fileToBase64(tiles[i]);
         const res = await fetch("/api/extract-report", {
