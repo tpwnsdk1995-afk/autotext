@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>대량 문자 발송</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Malgun Gothic", sans-serif; max-width: 720px; margin: 0 auto; padding: 16px; line-height: 1.5; }
+  h1 { font-size: 1.3rem; }
+  h2 { font-size: 1.05rem; margin-top: 2rem; }
+  textarea { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 0.95rem; padding: 8px; }
+  #pasteArea { height: 140px; }
+  #messageArea { height: 100px; }
+  button { padding: 8px 14px; font-size: 0.95rem; cursor: pointer; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  .settings-grid { display: grid; grid-template-columns: 90px 1fr; gap: 6px 10px; align-items: center; max-width: 420px; }
+  .settings-grid input { padding: 6px; font-size: 0.9rem; }
+  #numberList { list-style: none; padding: 0; margin: 8px 0; max-height: 260px; overflow-y: auto; border: 1px solid #8884; border-radius: 6px; }
+  #numberList li { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid #8882; }
+  #numberList li:last-child { border-bottom: none; }
+  #numberList .num { flex: 1; font-variant-numeric: tabular-nums; }
+  .del-btn { background: none; border: none; color: #c33; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; }
+  .muted { color: #888; font-size: 0.85rem; }
+  #summary { white-space: pre-wrap; font-size: 0.9rem; }
+  .status-ok { color: #2a7d2a; }
+  .status-bad { color: #c33; }
+  details > summary { cursor: pointer; }
+  .primary { font-weight: 600; }
+  #pasteArea.drag-over { outline: 2px dashed #38a; }
+  #ocrStatus { color: #557; }
+  #ocrWarning { display: none; background: #ffefc4; color: #664d03; border: 1px solid #e0c46c; border-radius: 6px; padding: 8px 10px; font-size: 0.85rem; margin: 8px 0; }
+</style>
+</head>
+<body>
+
+<h1>대량 문자 발송 도구</h1>
+
+<h2>1. 고객 정보 붙여넣기</h2>
+<p class="muted">텍스트를 붙여넣거나, 아래 "사진 선택" 버튼으로 캡처 이미지를 고르면 자동으로 번호까지 추출됩니다. (붙여넣기 Ctrl+V, 드래그도 가능)</p>
+<textarea id="pasteArea" placeholder="이름, 전화번호가 섞인 텍스트를 여기에 붙여넣으세요 (이미지도 붙여넣기/드래그 가능)"></textarea>
+<div class="row">
+  <button id="extractBtn" class="primary">번호 추출</button>
+  <button id="pickImageBtn">사진 선택</button>
+  <input type="file" id="imageFileInput" accept="image/*" style="display:none;">
+  <span class="muted" id="extractHint"></span>
+  <span id="ocrStatus"></span>
+</div>
+
+<h2>2. 번호 검수 (<span id="countLabel">0개</span>)</h2>
+<div id="ocrWarning">이미지에서 자동으로 읽은 번호입니다. OCR은 완벽하지 않아 숫자를 잘못 읽을 수 있으니, 발송 전 번호를 하나씩 꼭 확인해주세요.</div>
+<div class="row">
+  <button id="clearAllBtn">모두 삭제</button>
+</div>
+<ul id="numberList"></ul>
+<div class="row">
+  <input type="text" id="manualNumber" placeholder="번호 수동 추가 (예: 010-1234-5678)" style="flex:1; min-width:200px; padding:6px;">
+  <button id="addManualBtn">추가</button>
+</div>
+
+<h2>3. 문자 내용</h2>
+<textarea id="messageArea" placeholder="모든 수신자에게 동일하게 발송될 문자 내용"></textarea>
+<div class="muted" id="lenHint"></div>
+
+<h2>4. 발송 설정</h2>
+<p class="muted">SMS Gateway for Android 앱에서 "Local Server"를 켜면 아래 정보가 화면에 표시됩니다.</p>
+<div class="settings-grid">
+  <label for="ip">IP 주소</label><input type="text" id="ip" placeholder="예: 192.168.0.5 또는 127.0.0.1">
+  <label for="port">포트</label><input type="text" id="port" placeholder="8080" value="8080">
+  <label for="username">아이디</label><input type="text" id="username">
+  <label for="password">비밀번호</label><input type="password" id="password">
+</div>
+<div class="row">
+  <button id="testBtn">연결 테스트</button>
+  <span id="testResult"></span>
+</div>
+
+<details>
+  <summary>고급 설정 (청크 크기 / 지연시간)</summary>
+  <div class="settings-grid" style="margin-top:8px;">
+    <label for="chunkSize">청크 크기</label><input type="number" id="chunkSize" value="10" min="1">
+    <label for="delayMs">지연(ms)</label><input type="number" id="delayMs" value="3000" min="0" step="500">
+  </div>
+</details>
+
+<h2>5. 발송</h2>
+<div class="row">
+  <button id="sendBtn" class="primary">발송</button>
+  <button id="retryBtn" style="display:none;">실패 건만 재시도</button>
+</div>
+<div id="progress" class="muted"></div>
+<div id="summary"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  const STORAGE_KEY = "smsToolSettings";
+
+  const els = {
+    paste: document.getElementById("pasteArea"),
+    extractBtn: document.getElementById("extractBtn"),
+    extractHint: document.getElementById("extractHint"),
+    ocrStatus: document.getElementById("ocrStatus"),
+    ocrWarning: document.getElementById("ocrWarning"),
+    pickImageBtn: document.getElementById("pickImageBtn"),
+    imageFileInput: document.getElementById("imageFileInput"),
+    list: document.getElementById("numberList"),
+    clearAllBtn: document.getElementById("clearAllBtn"),
+    countLabel: document.getElementById("countLabel"),
+    manualNumber: document.getElementById("manualNumber"),
+    addManualBtn: document.getElementById("addManualBtn"),
+    message: document.getElementById("messageArea"),
+    lenHint: document.getElementById("lenHint"),
+    ip: document.getElementById("ip"),
+    port: document.getElementById("port"),
+    username: document.getElementById("username"),
+    password: document.getElementById("password"),
+    chunkSize: document.getElementById("chunkSize"),
+    delayMs: document.getElementById("delayMs"),
+    testBtn: document.getElementById("testBtn"),
+    testResult: document.getElementById("testResult"),
+    sendBtn: document.getElementById("sendBtn"),
+    retryBtn: document.getElementById("retryBtn"),
+    progress: document.getElementById("progress"),
+    summary: document.getElementById("summary"),
+  };
+
+  /** entries: [{ digits: "01012345678", display: "010-1234-5678", selected: true }] */
+  let entries = [];
+  let lastFailed = [];
+
+  // ---------- 설정 저장/복원 ----------
+  function loadSettings() {
+    try {
+      const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      if (s.ip) els.ip.value = s.ip;
+      if (s.port) els.port.value = s.port;
+      if (s.username) els.username.value = s.username;
+      if (s.password) els.password.value = s.password;
+      if (s.chunkSize) els.chunkSize.value = s.chunkSize;
+      if (s.delayMs !== undefined) els.delayMs.value = s.delayMs;
+    } catch (e) { /* 무시 */ }
+  }
+
+  function saveSettings() {
+    const s = {
+      ip: els.ip.value.trim(),
+      port: els.port.value.trim(),
+      username: els.username.value,
+      password: els.password.value,
+      chunkSize: els.chunkSize.value,
+      delayMs: els.delayMs.value,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+  }
+
+  [els.ip, els.port, els.username, els.password, els.chunkSize, els.delayMs].forEach((el) => {
+    el.addEventListener("change", saveSettings);
+  });
+
+  loadSettings();
+
+  // ---------- 번호 추출/정규화 ----------
+  const CANDIDATE_RE = /(?:\+?82[-.\s]?)?0?1[016789][-.\s]?\d{3,4}[-.\s]?\d{4}/g;
+  const VALID_RE = /^01[016789]\d{7,8}$/;
+
+  function normalize(raw) {
+    let hasCountryCode = /^\+?82/.test(raw);
+    let digits = raw.replace(/\D/g, "");
+    if (hasCountryCode) {
+      digits = digits.replace(/^82/, "");
+      if (!digits.startsWith("0")) digits = "0" + digits;
+    }
+    return digits;
+  }
+
+  function toDisplay(digits) {
+    if (digits.length === 11) return digits.replace(/(\d{3})(\d{4})(\d{4})/, "$1-$2-$3");
+    if (digits.length === 10) return digits.replace(/(\d{3})(\d{3})(\d{4})/, "$1-$2-$3");
+    return digits;
+  }
+
+  function extractNumbers(text) {
+    const found = text.match(CANDIDATE_RE) || [];
+    const seen = new Set(entries.map((e) => e.digits)); // 기존 수동 추가분 유지
+    const result = entries.filter((e) => e.manual);
+    for (const raw of found) {
+      const digits = normalize(raw);
+      if (!VALID_RE.test(digits)) continue;
+      if (seen.has(digits)) continue;
+      seen.add(digits);
+      result.push({ digits, display: toDisplay(digits), selected: true });
+    }
+    entries = result;
+    renderList();
+  }
+
+  function renderList() {
+    els.list.innerHTML = "";
+    for (const entry of entries) {
+      const li = document.createElement("li");
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = entry.selected;
+      checkbox.addEventListener("change", () => { entry.selected = checkbox.checked; });
+
+      const span = document.createElement("span");
+      span.className = "num";
+      span.textContent = entry.display;
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "del-btn";
+      delBtn.textContent = "삭제";
+      delBtn.addEventListener("click", () => {
+        entries = entries.filter((e) => e !== entry);
+        renderList();
+      });
+
+      li.appendChild(checkbox);
+      li.appendChild(span);
+      li.appendChild(delBtn);
+      els.list.appendChild(li);
+    }
+    els.countLabel.textContent = `${entries.length}개 (선택 ${entries.filter((e) => e.selected).length}개)`;
+  }
+
+  els.clearAllBtn.addEventListener("click", () => {
+    if (entries.length === 0) return;
+    const ok = confirm(`검수 목록의 번호 ${entries.length}개를 모두 삭제할까요?`);
+    if (!ok) return;
+    entries = [];
+    els.ocrWarning.style.display = "none";
+    renderList();
+  });
+
+  els.extractBtn.addEventListener("click", () => {
+    if (entries.length > 0) {
+      const ok = confirm("기존 목록에 추출 결과를 추가합니다. 계속할까요?\n(취소하면 추출을 중단합니다)");
+      if (!ok) return;
+    }
+    extractNumbers(els.paste.value);
+    els.extractHint.textContent = "추출 완료";
+  });
+
+  els.addManualBtn.addEventListener("click", () => {
+    const digits = normalize(els.manualNumber.value);
+    if (!VALID_RE.test(digits)) {
+      alert("올바른 휴대폰 번호 형식이 아닙니다.");
+      return;
+    }
+    if (entries.some((e) => e.digits === digits)) {
+      alert("이미 목록에 있는 번호입니다.");
+      return;
+    }
+    entries.push({ digits, display: toDisplay(digits), selected: true, manual: true });
+    els.manualNumber.value = "";
+    renderList();
+  });
+
+  // ---------- 이미지 붙여넣기/드래그 → OCR ----------
+  const TESSERACT_CDN = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+  let tesseractLoadPromise = null;
+
+  function loadTesseract() {
+    if (window.Tesseract) return Promise.resolve(window.Tesseract);
+    if (!tesseractLoadPromise) {
+      tesseractLoadPromise = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = TESSERACT_CDN;
+        script.onload = () => resolve(window.Tesseract);
+        script.onerror = () => reject(new Error("OCR 라이브러리를 불러오지 못했습니다 (인터넷 연결을 확인하세요)"));
+        document.head.appendChild(script);
+      });
+    }
+    return tesseractLoadPromise;
+  }
+
+  const OCR_MAX_DIMENSION = 6000; // 업스케일 후 캔버스 한 변의 최대 픽셀 (메모리 보호용)
+
+  async function upscaleImage(file, scale) {
+    const bitmap = await createImageBitmap(file);
+    const factor = Math.min(scale, OCR_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * factor);
+    canvas.height = Math.round(bitmap.height * factor);
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  }
+
+  async function runOcrOnImage(file) {
+    els.ocrWarning.style.display = "none";
+    try {
+      els.ocrStatus.textContent = "이미지 확대 처리 중...";
+      const upscaled = await upscaleImage(file, 3);
+      els.ocrStatus.textContent = "이미지 인식 준비 중...";
+      const Tesseract = await loadTesseract();
+      const { data } = await Tesseract.recognize(upscaled, "eng", {
+        logger: (m) => {
+          if (m.status === "recognizing text") {
+            els.ocrStatus.textContent = `이미지 인식 중... ${Math.round(m.progress * 100)}%`;
+          }
+        },
+      });
+      els.ocrStatus.textContent = "";
+      els.paste.value = els.paste.value ? els.paste.value + "\n" + data.text : data.text;
+      els.ocrWarning.style.display = "block";
+      extractNumbers(els.paste.value);
+      els.extractHint.textContent = "사진에서 번호 추출 완료 — 아래 목록을 꼭 확인하세요";
+    } catch (e) {
+      els.ocrStatus.textContent = "";
+      alert(`이미지 인식 실패: ${e.message || e}`);
+    }
+  }
+
+  function extractImageFile(dataTransferOrClipboard) {
+    const items = dataTransferOrClipboard.items;
+    if (items) {
+      for (const item of items) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          return item.getAsFile();
+        }
+      }
+    }
+    const files = dataTransferOrClipboard.files;
+    if (files && files.length && files[0].type.startsWith("image/")) {
+      return files[0];
+    }
+    return null;
+  }
+
+  document.addEventListener("paste", (e) => {
+    const file = extractImageFile(e.clipboardData);
+    if (file) {
+      e.preventDefault();
+      runOcrOnImage(file);
+    }
+  });
+
+  els.pickImageBtn.addEventListener("click", () => {
+    els.imageFileInput.click();
+  });
+
+  els.imageFileInput.addEventListener("change", () => {
+    const file = els.imageFileInput.files[0];
+    if (file) runOcrOnImage(file);
+    els.imageFileInput.value = "";
+  });
+
+  els.paste.addEventListener("input", () => {
+    els.ocrWarning.style.display = "none";
+  });
+
+  els.paste.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    els.paste.classList.add("drag-over");
+  });
+
+  els.paste.addEventListener("dragleave", () => {
+    els.paste.classList.remove("drag-over");
+  });
+
+  els.paste.addEventListener("drop", (e) => {
+    e.preventDefault();
+    els.paste.classList.remove("drag-over");
+    const file = extractImageFile(e.dataTransfer);
+    if (file) runOcrOnImage(file);
+  });
+
+  // ---------- 메시지 길이 안내 ----------
+  els.message.addEventListener("input", () => {
+    const text = els.message.value;
+    const bytes = new TextEncoder().encode(text).length;
+    let hint = `${text.length}자 / ${bytes}byte`;
+    if (bytes > 90 || text.length > 45) hint += " — 길이가 길어 여러 건으로 분할 발송될 수 있습니다";
+    els.lenHint.textContent = hint;
+  });
+
+  // ---------- 연결 테스트 ----------
+  els.testBtn.addEventListener("click", async () => {
+    const ip = els.ip.value.trim();
+    const port = els.port.value.trim();
+    if (!ip || !port) {
+      els.testResult.innerHTML = '<span class="status-bad">IP/포트를 입력하세요</span>';
+      return;
+    }
+    els.testResult.textContent = "확인 중...";
+    try {
+      const res = await fetch(`/api/health?ip=${encodeURIComponent(ip)}&port=${encodeURIComponent(port)}`);
+      const data = await res.json();
+      if (data.ok) {
+        els.testResult.innerHTML = '<span class="status-ok">연결 성공</span>';
+      } else {
+        els.testResult.innerHTML = `<span class="status-bad">연결 실패: ${data.error || "알 수 없는 오류"}</span>`;
+      }
+    } catch (e) {
+      els.testResult.innerHTML = `<span class="status-bad">프록시 서버 연결 실패 (run.bat 실행했는지 확인)</span>`;
+    }
+  });
+
+  // ---------- 발송 ----------
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  function chunk(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  async function sendToNumbers(numberEntries) {
+    const ip = els.ip.value.trim();
+    const port = els.port.value.trim();
+    const username = els.username.value;
+    const password = els.password.value;
+    const message = els.message.value;
+    const chunkSize = Math.max(1, parseInt(els.chunkSize.value, 10) || 10);
+    const delayMs = Math.max(0, parseInt(els.delayMs.value, 10) || 0);
+
+    if (!ip || !port || !username) {
+      alert("IP / 포트 / 아이디를 입력하세요.");
+      return;
+    }
+    if (!message.trim()) {
+      alert("문자 내용을 입력하세요.");
+      return;
+    }
+    if (numberEntries.length === 0) {
+      alert("보낼 번호가 없습니다.");
+      return;
+    }
+
+    els.sendBtn.disabled = true;
+    els.retryBtn.style.display = "none";
+    els.summary.textContent = "";
+    const chunks = chunk(numberEntries, chunkSize);
+    let success = 0;
+    const failed = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const group = chunks[i];
+      els.progress.textContent = `배치 ${i + 1}/${chunks.length} 전송 중... (성공 ${success}, 실패 ${failed.length})`;
+
+      let res, data;
+      try {
+        res = await fetch("/api/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ip, port, username, password, message,
+            numbers: group.map((e) => e.digits),
+          }),
+        });
+        data = await res.json();
+      } catch (e) {
+        els.progress.textContent = "";
+        els.summary.innerHTML = `<span class="status-bad">프록시 서버 연결 실패 — run.bat이 실행 중인지 확인하세요.</span>`;
+        els.sendBtn.disabled = false;
+        return;
+      }
+
+      if (data.ok) {
+        success += group.length;
+      } else if (data.status === 401) {
+        els.progress.textContent = "";
+        els.summary.innerHTML = `<span class="status-bad">인증 실패 — 아이디/비밀번호를 확인하세요. (이후 배치는 전송하지 않았습니다)</span>`;
+        els.sendBtn.disabled = false;
+        return;
+      } else {
+        failed.push(...group);
+      }
+
+      if (i < chunks.length - 1 && delayMs > 0) await sleep(delayMs);
+    }
+
+    els.progress.textContent = "";
+    lastFailed = failed;
+    const total = numberEntries.length;
+    els.summary.innerHTML =
+      `총 ${total}건 / 성공 ${success}건 / 실패 ${failed.length}건\n` +
+      (failed.length
+        ? `실패 번호: ${failed.map((e) => e.display).join(", ")}\n(게이트웨이 응답 수락 기준이며, 실제 수신 확인은 포함되지 않습니다)`
+        : `(게이트웨이 응답 수락 기준이며, 실제 수신 확인은 포함되지 않습니다)`);
+    els.retryBtn.style.display = failed.length ? "inline-block" : "none";
+    els.sendBtn.disabled = false;
+  }
+
+  els.sendBtn.addEventListener("click", () => {
+    const selected = entries.filter((e) => e.selected);
+    sendToNumbers(selected);
+  });
+
+  els.retryBtn.addEventListener("click", () => {
+    sendToNumbers(lastFailed);
+  });
+
+  renderList();
+})();
+</script>
+</body>
+</html>
