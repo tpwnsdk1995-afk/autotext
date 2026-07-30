@@ -319,6 +319,36 @@
     });
   }
 
+  // Claude API는 이미지가 너무 크면 자동으로 축소해서 처리하는데, 표 하나에 행이
+  // 많으면 그 과정에서 작은 글씨가 뭉개져 이름/번호를 잘못 읽는 원인이 된다.
+  // 세로로 여러 조각(타일)으로 잘라 조각당 픽셀 수를 줄이면 축소 없이 원본 그대로 읽힌다.
+  const TILE_MAX_PIXELS = 900000;
+  const TILE_OVERLAP_RATIO = 0.25;
+
+  async function sliceImageIntoTiles(file) {
+    const bitmap = await createImageBitmap(file);
+    const { width, height } = bitmap;
+    let tileHeight = Math.floor(TILE_MAX_PIXELS / width);
+    tileHeight = Math.max(300, Math.min(tileHeight, height));
+    if (tileHeight >= height) return [file];
+
+    const overlap = Math.floor(tileHeight * TILE_OVERLAP_RATIO);
+    const tiles = [];
+    let y = 0;
+    while (y < height) {
+      const sliceHeight = Math.min(tileHeight, height - y);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = sliceHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, y, width, sliceHeight, 0, 0, width, sliceHeight);
+      tiles.push(await new Promise((resolve) => canvas.toBlob(resolve, "image/png")));
+      if (y + sliceHeight >= height) break;
+      y += tileHeight - overlap;
+    }
+    return tiles;
+  }
+
   async function extractFromImage(file) {
     const apiKey = els.apiKey.value.trim();
     if (!apiKey) {
@@ -327,44 +357,54 @@
     }
     els.pickImageBtn.disabled = true;
     els.extractStatus.className = "loading";
-    els.extractStatus.textContent = "표 읽는 중... (몇 초~수십 초 걸릴 수 있습니다)";
     try {
-      const imageBase64 = await fileToBase64(file);
-      const res = await fetch("/api/extract-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, imageBase64, mediaType: file.type || "image/png" }),
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        els.extractStatus.className = "";
-        els.extractStatus.textContent = "";
-        alert(`추출 실패: ${data.error || "알 수 없는 오류"}`);
-        return;
-      }
+      els.extractStatus.textContent = "이미지 분할 중...";
+      const tiles = await sliceImageIntoTiles(file);
       const existingKeys = new Set(rows.map((r) => dedupeKey(r.name, r.digits)));
       const newRows = [];
       let skipped = 0;
-      for (const r of data.rows) {
-        const name = (r.name || "").trim();
-        const norm = normalizePhone(r.phone);
-        const key = dedupeKey(name, norm.digits);
-        if (existingKeys.has(key)) { skipped++; continue; }
-        existingKeys.add(key);
-        newRows.push({
-          selected: true,
-          type: (r.type && String(r.type).includes("반납")) ? "반납" : "수령",
-          name,
-          phone: norm.display,
-          digits: norm.digits,
-          reservedTime: r.reservedTime || "",
-          flight: r.flight || null,
-          actualTime: "",
-          status: "",
+      let rawCount = 0;
+
+      for (let i = 0; i < tiles.length; i++) {
+        els.extractStatus.textContent = tiles.length > 1
+          ? `표 읽는 중... (${i + 1}/${tiles.length} 조각)`
+          : "표 읽는 중... (몇 초~수십 초 걸릴 수 있습니다)";
+        const imageBase64 = await fileToBase64(tiles[i]);
+        const res = await fetch("/api/extract-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, imageBase64, mediaType: "image/png" }),
         });
+        const data = await res.json();
+        if (!data.ok) {
+          els.extractStatus.className = "";
+          els.extractStatus.textContent = "";
+          alert(`추출 실패 (${i + 1}/${tiles.length} 조각): ${data.error || "알 수 없는 오류"}`);
+          return;
+        }
+        rawCount += data.rows.length;
+        for (const r of data.rows) {
+          const name = (r.name || "").trim();
+          const norm = normalizePhone(r.phone);
+          const key = dedupeKey(name, norm.digits);
+          if (existingKeys.has(key)) { skipped++; continue; }
+          existingKeys.add(key);
+          newRows.push({
+            selected: true,
+            type: (r.type && String(r.type).includes("반납")) ? "반납" : "수령",
+            name,
+            phone: norm.display,
+            digits: norm.digits,
+            reservedTime: r.reservedTime || "",
+            flight: r.flight || null,
+            actualTime: "",
+            status: "",
+          });
+        }
       }
+
       rows = rows.concat(newRows);
-      totalExtracted += data.rows.length;
+      totalExtracted += rawCount;
       totalDuplicates += skipped;
       els.extractStatus.className = "";
       els.extractStatus.textContent = `${newRows.length}건 추출 완료` + (skipped ? ` (중복 ${skipped}건 제외)` : "") + " — 아래 표를 확인해주세요";
