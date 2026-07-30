@@ -55,6 +55,8 @@ REPORT_PROMPT = """이 이미지는 렌탈 대여/반납 관리 표입니다. �
 - 이름 옆 괄호 속 숫자(나이 등)는 name에 포함하지 말 것
 """
 
+COUNT_PROMPT = """이 이미지는 렌탈 대여/반납 관리 표입니다. 이미지 맨 위의 일자/전체·수령·반납 합계 요약표(제목, 합계 숫자 칸)는 제외하고, 왼쪽에 NO(순번)가 매겨진 실제 고객 데이터 행이 총 몇 개인지 처음부터 끝까지 세세요. 숫자만 출력하세요 (설명, 단위 없이 정수만, 예: 85)."""
+
 
 def call_anthropic_vision(api_key, image_b64, media_type, prompt):
     payload = {
@@ -235,6 +237,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": False, "error": f"Claude API 오류 (HTTP {e.code})", "detail": detail})
             except json.JSONDecodeError as e:
                 self._send_json(200, {"ok": False, "error": f"응답 파싱 실패: {e}"})
+            except Exception as e:
+                self._send_json(200, {"ok": False, "error": str(e)})
+            return
+
+        if parsed.path == "/api/count-rows":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "잘못된 요청 본문"})
+                return
+
+            api_key = str(data.get("apiKey", ""))
+            image_b64 = str(data.get("imageBase64", ""))
+            media_type = str(data.get("mediaType", "image/png"))
+
+            if not api_key or not image_b64:
+                self._send_json(400, {"ok": False, "error": "apiKey/imageBase64가 필요합니다"})
+                return
+
+            try:
+                result = call_anthropic_vision(api_key, image_b64, media_type, COUNT_PROMPT)
+                text = "".join(
+                    block.get("text", "") for block in result.get("content", []) if block.get("type") == "text"
+                )
+                match = re.search(r"\d+", text)
+                if not match:
+                    self._send_json(200, {"ok": False, "error": f"숫자 응답을 못 받았습니다: {text[:100]}"})
+                    return
+                self._send_json(200, {"ok": True, "count": int(match.group())})
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", "replace") if e.fp else ""
+                self._send_json(200, {"ok": False, "error": f"Claude API 오류 (HTTP {e.code})", "detail": detail})
             except Exception as e:
                 self._send_json(200, {"ok": False, "error": str(e)})
             return

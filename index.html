@@ -159,6 +159,7 @@
   let rows = [];
   let totalExtracted = 0;
   let totalDuplicates = 0;
+  let expectedTotal = 0; // 사진 자체에서 "몇 행이 있는지" 별도로 센 값 (검수용 기준치)
   let lastFailed = [];
 
   // ---------- 전화번호 정규화 ----------
@@ -299,9 +300,14 @@
 
   function updateCount() {
     const selectedCount = rows.filter((r) => r.selected && r.digits).length;
-    let text = `총 ${totalExtracted}건`;
-    if (totalDuplicates > 0) text += ` 중 중복 ${totalDuplicates}건 제외`;
-    text += `, 발송대상 ${selectedCount}건`;
+    let text = expectedTotal > 0
+      ? `사진 속 행 개수(추정) ${expectedTotal}건 → 발송대상 ${selectedCount}건`
+      : `발송대상 ${selectedCount}건`;
+    if (totalDuplicates > 0) text += ` (중복 ${totalDuplicates}건 자동 제외)`;
+    if (expectedTotal > 0 && selectedCount + totalDuplicates < expectedTotal) {
+      const missing = expectedTotal - totalDuplicates - selectedCount;
+      text += ` — ⚠ ${missing}건 누락 의심, 사진과 대조해주세요`;
+    }
     els.countLabel.textContent = text;
   }
 
@@ -350,6 +356,20 @@
     return { tiles, width, height, tileHeight };
   }
 
+  // 원본(자르지 않은) 사진 전체를 따로 보내 "행이 몇 개인지"만 세게 한다.
+  // 숫자 하나만 보면 되는 훨씬 쉬운 작업이라, 조각별 정밀 판독과는 별개로
+  // 사용자가 사진과 눈으로 대조할 수 있는 기준치를 제공한다.
+  async function countRowsInImage(file, apiKey) {
+    const imageBase64 = await fileToBase64(file);
+    const res = await fetch("/api/count-rows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey, imageBase64, mediaType: file.type || "image/png" }),
+    });
+    const data = await res.json();
+    return data.ok ? data.count : null;
+  }
+
   async function extractFromImage(file) {
     const apiKey = els.apiKey.value.trim();
     if (!apiKey) {
@@ -359,6 +379,7 @@
     els.pickImageBtn.disabled = true;
     els.extractStatus.className = "loading";
     try {
+      const countPromise = countRowsInImage(file, apiKey).catch(() => null);
       els.extractStatus.textContent = "이미지 분할 중...";
       const { tiles, width, height } = await sliceImageIntoTiles(file);
       console.log(`[추출] 원본 ${file.name}: ${width}x${height}, ${tiles.length}개 조각으로 분할`);
@@ -408,9 +429,12 @@
       rows = rows.concat(newRows);
       totalExtracted += rawCount;
       totalDuplicates += skipped;
+      const countedInPhoto = await countPromise;
+      if (countedInPhoto != null) expectedTotal += countedInPhoto;
       els.extractStatus.className = "";
       els.extractStatus.textContent = `${newRows.length}건 추출 완료` + (skipped ? ` (중복 ${skipped}건 제외)` : "")
-        + ` [원본 ${width}x${height}, ${tiles.length}조각]` + " — 아래 표를 확인해주세요";
+        + ` [원본 ${width}x${height}, ${tiles.length}조각` + (countedInPhoto != null ? `, 사진 속 행 개수(추정) ${countedInPhoto}건` : "") + `]`
+        + " — 아래 표를 확인해주세요";
       render();
     } catch (e) {
       els.extractStatus.className = "";
@@ -482,6 +506,7 @@
     rows = [];
     totalExtracted = 0;
     totalDuplicates = 0;
+    expectedTotal = 0;
     render();
   });
 
