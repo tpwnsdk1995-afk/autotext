@@ -122,10 +122,6 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_file("index.html", "text/html; charset=utf-8")
             return
 
-        if parsed.path in ("/report", "/report.html"):
-            self._serve_file("report.html", "text/html; charset=utf-8")
-            return
-
         if parsed.path == "/api/flight-arrival":
             qs = parse_qs(parsed.query)
             service_key = (qs.get("serviceKey") or [""])[0]
