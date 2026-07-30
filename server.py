@@ -36,7 +36,7 @@ def relay_post_json(url, username, password, payload):
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-sonnet-5"
-EXTRACT_TIMEOUT = 60
+EXTRACT_TIMEOUT = 240
 
 REPORT_PROMPT = """이 이미지는 렌탈 대여/반납 관리 표입니다. 표의 각 데이터 행을 읽어서, 아래 스키마의 JSON 배열만 출력하세요 (다른 설명이나 코드블록 없이 JSON만):
 
