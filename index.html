@@ -157,6 +157,8 @@
 
   /** rows: [{ selected, type, name, phone(display), digits, reservedTime, flight, actualTime, status }] */
   let rows = [];
+  let totalExtracted = 0;
+  let totalDuplicates = 0;
   let lastFailed = [];
 
   // ---------- 전화번호 정규화 ----------
@@ -297,7 +299,10 @@
 
   function updateCount() {
     const selectedCount = rows.filter((r) => r.selected && r.digits).length;
-    els.countLabel.textContent = `총 ${rows.length}건 중 발송대상 ${selectedCount}건`;
+    let text = `총 ${totalExtracted}건`;
+    if (totalDuplicates > 0) text += ` 중 중복 ${totalDuplicates}건 제외`;
+    text += `, 발송대상 ${selectedCount}건`;
+    els.countLabel.textContent = text;
   }
 
   function dedupeKey(name, digits) {
@@ -359,6 +364,8 @@
         });
       }
       rows = rows.concat(newRows);
+      totalExtracted += data.rows.length;
+      totalDuplicates += skipped;
       els.extractStatus.className = "";
       els.extractStatus.textContent = `${newRows.length}건 추출 완료` + (skipped ? ` (중복 ${skipped}건 제외)` : "") + " — 아래 표를 확인해주세요";
       render();
@@ -420,6 +427,7 @@
       selected: true, type: "수령", name, phone: norm.display, digits: norm.digits,
       reservedTime: "", flight: null, actualTime: "", status: "",
     });
+    totalExtracted += 1;
     els.manualName.value = "";
     els.manualNumber.value = "";
     render();
@@ -429,6 +437,8 @@
     if (rows.length === 0) return;
     if (!confirm(`${rows.length}건을 모두 삭제할까요?`)) return;
     rows = [];
+    totalExtracted = 0;
+    totalDuplicates = 0;
     render();
   });
 
