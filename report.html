@@ -61,6 +61,7 @@
 <table id="reportTable">
   <thead>
     <tr>
+      <th>NO</th>
       <th>수령/반납</th>
       <th>이름</th>
       <th>전화번호</th>
@@ -117,9 +118,12 @@
 
   function render() {
     els.body.innerHTML = "";
-    for (const row of rows) {
+    rows.forEach((row, idx) => {
       const tr = document.createElement("tr");
       tr.className = row.type === "반납" ? "type-반납" : "";
+
+      const noCell = document.createElement("td");
+      noCell.textContent = idx + 1;
 
       const typeCell = document.createElement("td");
       const typeSelect = document.createElement("select");
@@ -167,6 +171,7 @@
       });
       delCell.appendChild(delBtn);
 
+      tr.appendChild(noCell);
       tr.appendChild(typeCell);
       tr.appendChild(nameCell);
       tr.appendChild(phoneCell);
@@ -174,7 +179,7 @@
       tr.appendChild(actualCell);
       tr.appendChild(delCell);
       els.body.appendChild(tr);
-    }
+    });
     els.countLabel.textContent = `${rows.length}건`;
   }
 
@@ -208,17 +213,27 @@
         alert(`추출 실패: ${data.error || "알 수 없는 오류"}`);
         return;
       }
-      const newRows = data.rows.map((r) => ({
-        type: r.type === "반납" ? "반납" : "수령",
-        name: r.name || "",
-        phone: r.phone || "",
-        reservedTime: r.reservedTime || "",
-        flight: r.flight || null,
-        actualTime: "",
-        status: "",
-      }));
+      const existingKeys = new Set(rows.map((r) => `${r.name}|${r.phone}`));
+      const newRows = [];
+      let skipped = 0;
+      for (const r of data.rows) {
+        const name = r.name || "";
+        const phone = r.phone || "";
+        const key = `${name}|${phone}`;
+        if (existingKeys.has(key)) { skipped++; continue; }
+        existingKeys.add(key);
+        newRows.push({
+          type: (r.type && String(r.type).includes("반납")) ? "반납" : "수령",
+          name,
+          phone,
+          reservedTime: r.reservedTime || "",
+          flight: r.flight || null,
+          actualTime: "",
+          status: "",
+        });
+      }
       rows = rows.concat(newRows);
-      els.extractStatus.textContent = `${newRows.length}건 추출 완료 — 아래 표를 확인해주세요`;
+      els.extractStatus.textContent = `${newRows.length}건 추출 완료` + (skipped ? ` (중복 ${skipped}건 제외)` : "") + " — 아래 표를 확인해주세요";
       render();
     } catch (e) {
       els.extractStatus.textContent = "";
