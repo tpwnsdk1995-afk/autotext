@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +32,58 @@ def relay_post_json(url, username, password, payload):
     )
     with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         return resp.status, resp.read()
+
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+EXTRACT_TIMEOUT = 60
+
+REPORT_PROMPT = """이 이미지는 렌탈 대여/반납 관리 표입니다. 표의 모든 행을 빠짐없이 읽어서, 아래 스키마의 JSON 배열만 출력하세요 (다른 설명이나 코드블록 없이 JSON만):
+
+[{"type": "수령" 또는 "반납", "name": "수취인명", "phone": "010-1234-5678 형식", "reservedTime": "수령시간 열 값", "flight": "항공편코드 또는 null"}]
+
+규칙:
+- type: 왼쪽 "수령유형" 열이 "인천수령"이면 "수령", "인천반납"이면 "반납"
+- flight: type이 "반납"인 행에서만 채우고, 그 외에는 null. "수령장소" 열 괄호 안에 항공편 코드(예: KE0086)가 있으면 그 값을 쓰고, 괄호가 없거나 비어있으면 "수령특이사항" 열에서 "입국편: XXXX" 형태로 적힌 항공편 코드를 사용. 그것도 없으면 null.
+- 이름 옆 괄호 속 숫자(나이 등)는 name에 포함하지 말 것
+"""
+
+
+def call_anthropic_vision(api_key, image_b64, media_type, prompt):
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 8192,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    req = urllib.request.Request(
+        ANTHROPIC_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=EXTRACT_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def extract_json_array(text):
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return json.loads(text.strip())
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,6 +122,50 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_file("index.html", "text/html; charset=utf-8")
             return
 
+        if parsed.path in ("/report", "/report.html"):
+            self._serve_file("report.html", "text/html; charset=utf-8")
+            return
+
+        if parsed.path == "/api/flight-arrival":
+            qs = parse_qs(parsed.query)
+            service_key = (qs.get("serviceKey") or [""])[0]
+            flight_id = (qs.get("flightId") or [""])[0].strip().upper()
+            if not service_key or not flight_id:
+                self._send_json(400, {"ok": False, "error": "serviceKey/flightId가 필요합니다"})
+                return
+            url = f"http://apis.data.go.kr/B551177/StatusOfPassengerFlightsDSOdp/getPassengerArrivalsDSOdp?serviceKey={service_key}&type=json"
+            try:
+                status, body = relay_get(url)
+                data = json.loads(body.decode("utf-8"))
+                items = (
+                    data.get("response", {})
+                    .get("body", {})
+                    .get("items", {})
+                    .get("item", [])
+                )
+                if isinstance(items, dict):
+                    items = [items]
+                norm_target = flight_id.replace(" ", "")
+
+                def core(s):
+                    m = re.match(r"([A-Z]+)0*(\d+)", s)
+                    return (m.group(1), m.group(2)) if m else (s, "")
+
+                target_core = core(norm_target)
+                match = None
+                for item in items:
+                    fid = str(item.get("flightId", "")).replace(" ", "").upper()
+                    if fid == norm_target or core(fid) == target_core:
+                        match = item
+                        break
+                if match:
+                    self._send_json(200, {"ok": True, "found": True, "item": match})
+                else:
+                    self._send_json(200, {"ok": True, "found": False})
+            except Exception as e:
+                self._send_json(200, {"ok": False, "error": str(e)})
+            return
+
         self.send_error(404)
 
     def do_POST(self):
@@ -104,6 +201,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": False, "status": e.code, "error": f"HTTP {e.code}", "detail": detail})
             except Exception as e:
                 self._send_json(200, {"ok": False, "error": f"연결 실패: {e}"})
+            return
+
+        if parsed.path == "/api/extract-report":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "잘못된 요청 본문"})
+                return
+
+            api_key = str(data.get("apiKey", ""))
+            image_b64 = str(data.get("imageBase64", ""))
+            media_type = str(data.get("mediaType", "image/png"))
+
+            if not api_key or not image_b64:
+                self._send_json(400, {"ok": False, "error": "apiKey/imageBase64가 필요합니다"})
+                return
+
+            try:
+                result = call_anthropic_vision(api_key, image_b64, media_type, REPORT_PROMPT)
+                text = "".join(
+                    block.get("text", "") for block in result.get("content", []) if block.get("type") == "text"
+                )
+                rows = extract_json_array(text)
+                self._send_json(200, {"ok": True, "rows": rows})
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", "replace") if e.fp else ""
+                self._send_json(200, {"ok": False, "error": f"Claude API 오류 (HTTP {e.code})", "detail": detail})
+            except json.JSONDecodeError as e:
+                self._send_json(200, {"ok": False, "error": f"응답 파싱 실패: {e}"})
+            except Exception as e:
+                self._send_json(200, {"ok": False, "error": str(e)})
             return
 
         self.send_error(404)
