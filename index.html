@@ -331,7 +331,7 @@
     const { width, height } = bitmap;
     let tileHeight = Math.floor(TILE_MAX_PIXELS / width);
     tileHeight = Math.max(TILE_MIN_HEIGHT, Math.min(tileHeight, height));
-    if (tileHeight >= height) return [file];
+    if (tileHeight >= height) return { tiles: [file], width, height, tileHeight: height };
 
     const overlap = Math.floor(tileHeight * TILE_OVERLAP_RATIO);
     const tiles = [];
@@ -347,7 +347,7 @@
       if (y + sliceHeight >= height) break;
       y += tileHeight - overlap;
     }
-    return tiles;
+    return { tiles, width, height, tileHeight };
   }
 
   async function extractFromImage(file) {
@@ -360,8 +360,8 @@
     els.extractStatus.className = "loading";
     try {
       els.extractStatus.textContent = "이미지 분할 중...";
-      const tiles = await sliceImageIntoTiles(file);
-      console.log(`[추출] 원본 ${file.name}: ${tiles.length}개 조각으로 분할`);
+      const { tiles, width, height } = await sliceImageIntoTiles(file);
+      console.log(`[추출] 원본 ${file.name}: ${width}x${height}, ${tiles.length}개 조각으로 분할`);
       const existingKeys = new Set(rows.map((r) => dedupeKey(r.name, r.digits)));
       const newRows = [];
       let skipped = 0;
@@ -409,7 +409,8 @@
       totalExtracted += rawCount;
       totalDuplicates += skipped;
       els.extractStatus.className = "";
-      els.extractStatus.textContent = `${newRows.length}건 추출 완료` + (skipped ? ` (중복 ${skipped}건 제외)` : "") + " — 아래 표를 확인해주세요";
+      els.extractStatus.textContent = `${newRows.length}건 추출 완료` + (skipped ? ` (중복 ${skipped}건 제외)` : "")
+        + ` [원본 ${width}x${height}, ${tiles.length}조각]` + " — 아래 표를 확인해주세요";
       render();
     } catch (e) {
       els.extractStatus.className = "";
