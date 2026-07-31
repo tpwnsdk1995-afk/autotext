@@ -1,8 +1,11 @@
 import base64
+import io
 import json
 import re
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -65,6 +68,124 @@ REPORT_PROMPT = """이 이미지는 렌탈 대여/반납 관리 표입니다. �
 """
 
 COUNT_PROMPT = """이 이미지는 렌탈 대여/반납 관리 표입니다. 이미지 맨 위의 일자/전체·수령·반납 합계 요약표(제목, 합계 숫자 칸)는 제외하고, 왼쪽에 NO(순번)가 매겨진 실제 고객 데이터 행이 총 몇 개인지 처음부터 끝까지 세세요. 숫자만 출력하세요 (설명, 단위 없이 정수만, 예: 85)."""
+
+
+# ---------- 엑셀(xlsx) 원본 파일 직접 읽기 (AI 없이, 100% 정확) ----------
+XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+PREFERRED_SHEET_NAMES = ["2터미널", "전체일정", "1터미널"]
+FLIGHT_PAREN_RE = re.compile(r"\(([A-Za-z0-9]+)\)")
+FLIGHT_ARRIVAL_RE = re.compile(r"입국편\s*[:：]\s*([A-Za-z0-9]+)")
+
+
+def col_letters(cell_ref):
+    return "".join(ch for ch in cell_ref if ch.isalpha())
+
+
+def load_shared_strings(zf):
+    shared = []
+    try:
+        with zf.open("xl/sharedStrings.xml") as f:
+            for _event, elem in ET.iterparse(f, events=("end",)):
+                if elem.tag == XLSX_NS + "si":
+                    text = "".join(t.text or "" for t in elem.iter() if t.tag == XLSX_NS + "t")
+                    shared.append(text)
+                    elem.clear()
+    except KeyError:
+        pass
+    return shared
+
+
+def pick_sheet_file(zf):
+    workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
+    rels_xml = zf.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    sheets = re.findall(r'<sheet name="([^"]+)"[^>]*r:id="(rId\d+)"', workbook_xml)
+    rels = dict(re.findall(r'<Relationship Id="(rId\d+)"[^>]*Target="worksheets/(sheet\d+\.xml)"', rels_xml))
+    name_to_file = {name: rels[rid] for name, rid in sheets if rid in rels}
+    for preferred in PREFERRED_SHEET_NAMES:
+        if preferred in name_to_file:
+            return name_to_file[preferred], preferred
+    if sheets:
+        name, rid = sheets[0]
+        return rels.get(rid), name
+    return None, None
+
+
+def excel_time_to_hhmm(value):
+    try:
+        frac = float(value)
+    except (TypeError, ValueError):
+        return ""
+    total_minutes = round((frac % 1) * 24 * 60)
+    h, m = divmod(total_minutes, 60)
+    return f"{h}:{m:02d}"
+
+
+def extract_flight(location, note):
+    if location:
+        m = FLIGHT_PAREN_RE.search(location)
+        if m:
+            return m.group(1)
+    if note:
+        m = FLIGHT_ARRIVAL_RE.search(note)
+        if m:
+            return m.group(1)
+    return None
+
+
+def parse_rental_sheet(file_bytes):
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        shared = load_shared_strings(zf)
+        sheet_file, sheet_name = pick_sheet_file(zf)
+        if not sheet_file:
+            raise ValueError("시트를 찾을 수 없습니다")
+
+        rows_out = []
+        header_seen = False
+        with zf.open(f"xl/worksheets/{sheet_file}") as f:
+            for _event, elem in ET.iterparse(f, events=("end",)):
+                if elem.tag != XLSX_NS + "row":
+                    continue
+                cells = {}
+                for c in elem:
+                    ref = c.get("r")
+                    if not ref:
+                        continue
+                    col = col_letters(ref)
+                    t = c.get("t")
+                    v = c.find(XLSX_NS + "v")
+                    val = v.text if v is not None else None
+                    if t == "s" and val is not None:
+                        idx = int(val)
+                        val = shared[idx] if idx < len(shared) else ""
+                    cells[col] = val
+                elem.clear()
+
+                no_val = cells.get("A")
+                type_val = cells.get("B")
+                name_val = cells.get("E")
+                phone_val = cells.get("F")
+
+                if type_val == "수령유형":
+                    header_seen = True
+                    continue
+                if not header_seen:
+                    continue
+                if not no_val or not str(no_val).strip().isdigit():
+                    continue
+                if not name_val or not phone_val:
+                    continue
+
+                row_type = "반납" if type_val and "반납" in type_val else "수령"
+                flight = extract_flight(cells.get("G"), cells.get("J")) if row_type == "반납" else None
+
+                rows_out.append({
+                    "type": row_type,
+                    "name": str(name_val).strip(),
+                    "phone": str(phone_val).strip(),
+                    "reservedTime": excel_time_to_hhmm(cells.get("H")),
+                    "flight": flight,
+                })
+        return rows_out, sheet_name
 
 
 def call_anthropic_vision(api_key, image_b64, media_type, prompt):
@@ -280,6 +401,28 @@ class Handler(BaseHTTPRequestHandler):
             except urllib.error.HTTPError as e:
                 detail = e.read().decode("utf-8", "replace") if e.fp else ""
                 self._send_json(200, {"ok": False, "error": f"Claude API 오류 (HTTP {e.code})", "detail": detail})
+            except Exception as e:
+                self._send_json(200, {"ok": False, "error": str(e)})
+            return
+
+        if parsed.path == "/api/parse-xlsx":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "잘못된 요청 본문"})
+                return
+
+            file_b64 = str(data.get("fileBase64", ""))
+            if not file_b64:
+                self._send_json(400, {"ok": False, "error": "fileBase64가 필요합니다"})
+                return
+
+            try:
+                file_bytes = base64.b64decode(file_b64)
+                rows, sheet_name = parse_rental_sheet(file_bytes)
+                self._send_json(200, {"ok": True, "rows": rows, "sheet": sheet_name})
             except Exception as e:
                 self._send_json(200, {"ok": False, "error": str(e)})
             return
