@@ -273,10 +273,10 @@
       timeCell.appendChild(timeInput);
 
       const actualCell = document.createElement("td");
-      if (row.status === "error") {
-        actualCell.innerHTML = '<span class="badge-error">에러</span>';
+      if (row.status === "wrong_day" || row.status === "notfound") {
+        actualCell.innerHTML = `<span class="badge-error">${actualTimeLabel(row)}</span>`;
       } else {
-        actualCell.textContent = row.actualTime || (row.type === "반납" ? "-" : "");
+        actualCell.textContent = actualTimeLabel(row);
       }
 
       const delCell = document.createElement("td");
@@ -313,6 +313,13 @@
       text += ` — ⚠ ${missing}건 누락 의심, 사진과 대조해주세요`;
     }
     els.countLabel.textContent = text;
+  }
+
+  function actualTimeLabel(row) {
+    if (row.status === "ok") return row.actualTime || "";
+    if (row.status === "wrong_day") return row.dayDiff === 1 ? "내일반납" : `${row.dayDiff}일후반납`;
+    if (row.status === "notfound") return "조회불가";
+    return row.type === "반납" ? "-" : "";
   }
 
   function dedupeKey(name, digits) {
@@ -582,7 +589,7 @@
 
   els.copyBtn.addEventListener("click", async () => {
     const lines = rows.map((r) =>
-      [r.type, r.name, r.phone, r.reservedTime, r.type === "반납" ? (r.status === "error" ? "에러" : r.actualTime || "") : ""].join(" / ")
+      [r.type, r.name, r.phone, r.reservedTime, r.type === "반납" ? actualTimeLabel(r) : ""].join(" / ")
     );
     const text = lines.join("\n");
     try {
@@ -622,11 +629,16 @@
       }
       for (const row of targets) {
         const result = data.results[row.flight];
-        if (!result || !result.found) {
-          row.status = "error";
-        } else {
+        if (!result) {
+          row.status = "notfound";
+        } else if (result.found) {
           row.actualTime = result.item.estimatedTime || result.item.scheduleTime || "";
-          row.status = row.actualTime ? "ok" : "error";
+          row.status = row.actualTime ? "ok" : "notfound";
+        } else if (result.reason === "wrong_day") {
+          row.status = "wrong_day";
+          row.dayDiff = result.dayDiff;
+        } else {
+          row.status = "notfound";
         }
       }
       els.lookupStatus.textContent = `완료 (${targets.length}건 대조함)`;

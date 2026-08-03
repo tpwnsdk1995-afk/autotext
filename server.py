@@ -52,10 +52,16 @@ def fetch_flight_items(service_key):
 
 
 def match_flight(items, flight_id):
-    """이미 받아온 items 목록에서 특정 편명의 당일 도착 정보를 찾는다."""
+    """이미 받아온 items 목록에서 특정 편명의 당일 도착 정보를 찾는다.
+
+    reason 값:
+    - (found=True인 경우 없음)
+    - "wrong_day": 편명은 찾았지만 오늘 도착편이 아님 (dayDiff = 오늘 기준 며칠 후인지)
+    - "notfound": 그 편명 자체가 D+0~D+6 목록에 아예 없음
+    """
     norm_target = str(flight_id).replace(" ", "").upper()
     target_core = _flight_core(norm_target)
-    today_str = datetime.now().strftime("%Y%m%d")
+    today = datetime.now().date()
 
     candidates = [
         item for item in items
@@ -63,19 +69,30 @@ def match_flight(items, flight_id):
             str(item.get("flightId", "")).replace(" ", "").upper()
         )
     ]
+    if not candidates:
+        return {"found": False, "reason": "notfound"}
 
-    today_match = next(
-        (it for it in candidates if str(it.get("scheduleDateTime", "")).startswith(today_str)),
-        None,
-    )
+    def parse_date(item):
+        s = str(item.get("scheduleDateTime", ""))
+        try:
+            return datetime.strptime(s[:8], "%Y%m%d").date()
+        except ValueError:
+            return None
+
+    today_match = next((it for it in candidates if parse_date(it) == today), None)
     if today_match:
         item = dict(today_match)
         item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
         item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
         return {"found": True, "item": item}
-    if candidates:
-        return {"found": False, "error": "당일 도착편이 아닙니다"}
-    return {"found": False}
+
+    dated = sorted(
+        ((parse_date(it), it) for it in candidates if parse_date(it) is not None),
+        key=lambda pair: pair[0],
+    )
+    if dated:
+        return {"found": False, "reason": "wrong_day", "dayDiff": (dated[0][0] - today).days}
+    return {"found": False, "reason": "notfound"}
 
 PORT = 8000
 STATIC_DIR = Path(__file__).parent
