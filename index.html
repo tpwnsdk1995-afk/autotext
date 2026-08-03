@@ -620,7 +620,7 @@
         if (!data.ok || !data.found) {
           row.status = "error";
         } else {
-          row.actualTime = data.item.estimatedDateTime || data.item.scheduleDateTime || "";
+          row.actualTime = data.item.estimatedTime || data.item.scheduleTime || "";
           row.status = row.actualTime ? "ok" : "error";
         }
       } catch (e) {

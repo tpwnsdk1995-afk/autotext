@@ -6,18 +6,28 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
+
+
+def format_hhmm(value):
+    """'202608030025' 같은 YYYYMMDDHHmm 문자열을 'H:MM'으로 변환"""
+    s = str(value or "")
+    if len(s) < 12:
+        return s
+    h, m = int(s[8:10]), int(s[10:12])
+    return f"{h}:{m:02d}"
 
 PORT = 8000
 STATIC_DIR = Path(__file__).parent
 REQUEST_TIMEOUT = 15
 
 
-def relay_get(url):
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+def relay_get(url, timeout=REQUEST_TIMEOUT):
+    req = urllib.request.Request(url, method="GET", headers={"User-Agent": "curl/8.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status, resp.read()
 
 
@@ -268,18 +278,14 @@ class Handler(BaseHTTPRequestHandler):
             if not service_key or not flight_id:
                 self._send_json(400, {"ok": False, "error": "serviceKey/flightId가 필요합니다"})
                 return
-            url = f"http://apis.data.go.kr/B551177/StatusOfPassengerFlightsDSOdp/getPassengerArrivalsDSOdp?serviceKey={service_key}&type=json"
+            url = f"https://apis.data.go.kr/B551177/StatusOfPassengerFlightsDSOdp/getPassengerArrivalsDSOdp?serviceKey={quote(service_key, safe='')}&type=json"
             try:
-                status, body = relay_get(url)
+                status, body = relay_get(url, timeout=60)  # 응답이 2MB+로 커서 넉넉하게
                 data = json.loads(body.decode("utf-8"))
-                items = (
-                    data.get("response", {})
-                    .get("body", {})
-                    .get("items", {})
-                    .get("item", [])
-                )
+                items = data.get("response", {}).get("body", {}).get("items", [])
                 if isinstance(items, dict):
                     items = [items]
+
                 norm_target = flight_id.replace(" ", "")
 
                 def core(s):
@@ -287,14 +293,26 @@ class Handler(BaseHTTPRequestHandler):
                     return (m.group(1), m.group(2)) if m else (s, "")
 
                 target_core = core(norm_target)
-                match = None
+                today_str = datetime.now().strftime("%Y%m%d")
+
+                candidates = []
                 for item in items:
                     fid = str(item.get("flightId", "")).replace(" ", "").upper()
                     if fid == norm_target or core(fid) == target_core:
-                        match = item
-                        break
-                if match:
-                    self._send_json(200, {"ok": True, "found": True, "item": match})
+                        candidates.append(item)
+
+                today_match = next(
+                    (it for it in candidates if str(it.get("scheduleDateTime", "")).startswith(today_str)),
+                    None,
+                )
+                if today_match:
+                    item = dict(today_match)
+                    item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
+                    item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
+                    self._send_json(200, {"ok": True, "found": True, "item": item})
+                elif candidates:
+                    # 편명은 찾았지만 당일 도착편이 아님
+                    self._send_json(200, {"ok": True, "found": False, "error": "당일 도착편이 아닙니다"})
                 else:
                     self._send_json(200, {"ok": True, "found": False})
             except Exception as e:
