@@ -9,7 +9,7 @@ import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs, quote, unquote
 
 
 def format_hhmm(value):
@@ -26,8 +26,22 @@ def _flight_core(s):
     return (m.group(1), m.group(2)) if m else (s, "")
 
 
+def normalize_service_key(key):
+    """data.go.kr 포털은 서비스키를 이미 URL-인코딩된 형태(%2B 등)로 화면에 보여준다.
+    사용자가 그 표시된 문자열을 그대로 복사-붙여넣기하면 원문에 '%XX'가 문자 그대로
+    들어있게 되는데, 여기서 그대로 다시 quote()하면 이중 인코딩되어 키가 깨진다.
+    이미 인코딩된 것으로 보이면 한 번 디코딩해서 '원본' 키로 되돌려 놓는다."""
+    if re.search(r"%[0-9A-Fa-f]{2}", key):
+        try:
+            return unquote(key)
+        except Exception:
+            return key
+    return key
+
+
 def fetch_flight_items(service_key):
     """당일 기준 D+0~D+6 인천공항 도착 항공편 전체 목록을 한 번만 받아온다 (응답 2MB+)."""
+    service_key = normalize_service_key(service_key)
     url = f"https://apis.data.go.kr/B551177/StatusOfPassengerFlightsDSOdp/getPassengerArrivalsDSOdp?serviceKey={quote(service_key, safe='')}&type=json"
     status, body = relay_get(url, timeout=60)
     data = json.loads(body.decode("utf-8"))
