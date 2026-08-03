@@ -20,6 +20,49 @@ def format_hhmm(value):
     h, m = int(s[8:10]), int(s[10:12])
     return f"{h}:{m:02d}"
 
+
+def _flight_core(s):
+    m = re.match(r"([A-Z]+)0*(\d+)", s)
+    return (m.group(1), m.group(2)) if m else (s, "")
+
+
+def fetch_flight_items(service_key):
+    """당일 기준 D+0~D+6 인천공항 도착 항공편 전체 목록을 한 번만 받아온다 (응답 2MB+)."""
+    url = f"https://apis.data.go.kr/B551177/StatusOfPassengerFlightsDSOdp/getPassengerArrivalsDSOdp?serviceKey={quote(service_key, safe='')}&type=json"
+    status, body = relay_get(url, timeout=60)
+    data = json.loads(body.decode("utf-8"))
+    items = data.get("response", {}).get("body", {}).get("items", [])
+    if isinstance(items, dict):
+        items = [items]
+    return items
+
+
+def match_flight(items, flight_id):
+    """이미 받아온 items 목록에서 특정 편명의 당일 도착 정보를 찾는다."""
+    norm_target = str(flight_id).replace(" ", "").upper()
+    target_core = _flight_core(norm_target)
+    today_str = datetime.now().strftime("%Y%m%d")
+
+    candidates = [
+        item for item in items
+        if (lambda fid: fid == norm_target or _flight_core(fid) == target_core)(
+            str(item.get("flightId", "")).replace(" ", "").upper()
+        )
+    ]
+
+    today_match = next(
+        (it for it in candidates if str(it.get("scheduleDateTime", "")).startswith(today_str)),
+        None,
+    )
+    if today_match:
+        item = dict(today_match)
+        item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
+        item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
+        return {"found": True, "item": item}
+    if candidates:
+        return {"found": False, "error": "당일 도착편이 아닙니다"}
+    return {"found": False}
+
 PORT = 8000
 STATIC_DIR = Path(__file__).parent
 REQUEST_TIMEOUT = 15
@@ -278,43 +321,10 @@ class Handler(BaseHTTPRequestHandler):
             if not service_key or not flight_id:
                 self._send_json(400, {"ok": False, "error": "serviceKey/flightId가 필요합니다"})
                 return
-            url = f"https://apis.data.go.kr/B551177/StatusOfPassengerFlightsDSOdp/getPassengerArrivalsDSOdp?serviceKey={quote(service_key, safe='')}&type=json"
             try:
-                status, body = relay_get(url, timeout=60)  # 응답이 2MB+로 커서 넉넉하게
-                data = json.loads(body.decode("utf-8"))
-                items = data.get("response", {}).get("body", {}).get("items", [])
-                if isinstance(items, dict):
-                    items = [items]
-
-                norm_target = flight_id.replace(" ", "")
-
-                def core(s):
-                    m = re.match(r"([A-Z]+)0*(\d+)", s)
-                    return (m.group(1), m.group(2)) if m else (s, "")
-
-                target_core = core(norm_target)
-                today_str = datetime.now().strftime("%Y%m%d")
-
-                candidates = []
-                for item in items:
-                    fid = str(item.get("flightId", "")).replace(" ", "").upper()
-                    if fid == norm_target or core(fid) == target_core:
-                        candidates.append(item)
-
-                today_match = next(
-                    (it for it in candidates if str(it.get("scheduleDateTime", "")).startswith(today_str)),
-                    None,
-                )
-                if today_match:
-                    item = dict(today_match)
-                    item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
-                    item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
-                    self._send_json(200, {"ok": True, "found": True, "item": item})
-                elif candidates:
-                    # 편명은 찾았지만 당일 도착편이 아님
-                    self._send_json(200, {"ok": True, "found": False, "error": "당일 도착편이 아닙니다"})
-                else:
-                    self._send_json(200, {"ok": True, "found": False})
+                items = fetch_flight_items(service_key)
+                result = match_flight(items, flight_id)
+                self._send_json(200, {"ok": True, **result})
             except Exception as e:
                 self._send_json(200, {"ok": False, "error": str(e)})
             return
@@ -441,6 +451,29 @@ class Handler(BaseHTTPRequestHandler):
                 file_bytes = base64.b64decode(file_b64)
                 rows, sheet_name = parse_rental_sheet(file_bytes)
                 self._send_json(200, {"ok": True, "rows": rows, "sheet": sheet_name})
+            except Exception as e:
+                self._send_json(200, {"ok": False, "error": str(e)})
+            return
+
+        if parsed.path == "/api/flight-arrivals-batch":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "잘못된 요청 본문"})
+                return
+
+            service_key = str(data.get("serviceKey", ""))
+            flight_ids = data.get("flightIds", [])
+            if not service_key or not flight_ids:
+                self._send_json(400, {"ok": False, "error": "serviceKey/flightIds가 필요합니다"})
+                return
+
+            try:
+                items = fetch_flight_items(service_key)  # 전체 목록 한 번만 조회
+                results = {fid: match_flight(items, fid) for fid in flight_ids}
+                self._send_json(200, {"ok": True, "results": results})
             except Exception as e:
                 self._send_json(200, {"ok": False, "error": str(e)})
             return
