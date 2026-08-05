@@ -51,8 +51,13 @@ def fetch_flight_items(service_key):
     return items
 
 
-def match_flight(items, flight_id):
-    """이미 받아온 items 목록에서 특정 편명의 당일 도착 정보를 찾는다.
+def match_flight(items, flight_id, expected_date=None):
+    """이미 받아온 items 목록에서 특정 편명의 도착 정보를 찾는다.
+
+    같은 편명이 매일 뜨는 노선이면 D+0~D+6 목록 안에 오늘 것과 내일 것이 동시에
+    들어있을 수 있다. expected_date(그 예약이 실제로 몇 일자인지, 리포트의 "일" 값)를
+    넘기면 그 날짜의 운항편을 먼저 찾아 고르고, 없으면(과거 방식과 동일하게) 오늘 날짜를
+    기준으로 찾는다.
 
     reason 값:
     - (found=True인 경우 없음)
@@ -62,6 +67,7 @@ def match_flight(items, flight_id):
     norm_target = str(flight_id).replace(" ", "").upper()
     target_core = _flight_core(norm_target)
     today = datetime.now().date()
+    anchor = expected_date or today
 
     candidates = [
         item for item in items
@@ -79,12 +85,14 @@ def match_flight(items, flight_id):
         except ValueError:
             return None
 
-    today_match = next((it for it in candidates if parse_date(it) == today), None)
-    if today_match:
-        item = dict(today_match)
-        item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
-        item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
-        return {"found": True, "item": item}
+    anchor_match = next((it for it in candidates if parse_date(it) == anchor), None)
+    if anchor_match:
+        if anchor == today:
+            item = dict(anchor_match)
+            item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
+            item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
+            return {"found": True, "item": item}
+        return {"found": False, "reason": "wrong_day", "dayDiff": (anchor - today).days}
 
     dated = sorted(
         ((parse_date(it), it) for it in candidates if parse_date(it) is not None),
@@ -501,9 +509,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "serviceKey/flightIds가 필요합니다"})
                 return
 
+            expected_date = None
+            target_date_str = str(data.get("targetDate", "")).strip()
+            if target_date_str:
+                try:
+                    expected_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    expected_date = None
+
             try:
                 items = fetch_flight_items(service_key)  # 전체 목록 한 번만 조회
-                results = {fid: match_flight(items, fid) for fid in flight_ids}
+                results = {fid: match_flight(items, fid, expected_date) for fid in flight_ids}
                 self._send_json(200, {"ok": True, "results": results})
             except Exception as e:
                 self._send_json(200, {"ok": False, "error": str(e)})
