@@ -325,13 +325,26 @@
     els.countLabel.textContent = text;
   }
 
+  // 판단은 사람이 하도록, 그 편명이 D+0~D+6에서 뜬 날짜/시간 후보를 구글처럼 전부 나열
+  function candidateListLabel(row) {
+    if (!row.allCandidates || row.allCandidates.length === 0) return "";
+    return row.allCandidates
+      .map((c) => {
+        const [, mo, da] = c.date.split("-");
+        const t = c.estimatedTime || c.scheduleTime || "?";
+        return `${+mo}/${+da}${c.isToday ? "(오늘)" : ""} ${t}`;
+      })
+      .join(" · ");
+  }
+
   function actualTimeLabel(row) {
-    if (row.status === "ok") return row.actualTime || "";
+    const list = candidateListLabel(row);
+    if (row.status === "ok") return list || row.actualTime || "";
     if (row.status === "wrong_day") {
       const label = row.dayDiff === 1 ? "내일반납" : `${row.dayDiff}일후반납`;
-      return row.futureTime ? `${label} (${row.futureTime})` : label;
+      return list ? `${label} — ${list}` : label;
     }
-    if (row.status === "notfound") return "조회불가";
+    if (row.status === "notfound") return list || "조회불가";
     return row.type === "반납" ? "-" : "";
   }
 
@@ -643,6 +656,7 @@
       }
       for (const row of targets) {
         const result = data.results[row.flight];
+        row.allCandidates = result ? (result.allCandidates || []) : [];
         if (!result) {
           row.status = "notfound";
         } else if (result.found) {
@@ -651,7 +665,6 @@
         } else if (result.reason === "wrong_day") {
           row.status = "wrong_day";
           row.dayDiff = result.dayDiff;
-          row.futureTime = result.item ? (result.item.estimatedTime || result.item.scheduleTime || "") : "";
         } else {
           row.status = "notfound";
         }

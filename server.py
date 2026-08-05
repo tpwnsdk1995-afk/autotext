@@ -76,7 +76,7 @@ def match_flight(items, flight_id, expected_date=None):
         )
     ]
     if not candidates:
-        return {"found": False, "reason": "notfound"}
+        return {"found": False, "reason": "notfound", "allCandidates": []}
 
     def parse_date(item):
         s = str(item.get("scheduleDateTime", ""))
@@ -91,21 +91,28 @@ def match_flight(items, flight_id, expected_date=None):
         item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
         return item
 
-    anchor_match = next((it for it in candidates if parse_date(it) == anchor), None)
-    if anchor_match:
-        item = with_times(anchor_match)
-        if anchor == today:
-            return {"found": True, "item": item}
-        return {"found": False, "reason": "wrong_day", "dayDiff": (anchor - today).days, "item": item}
-
     dated = sorted(
         ((parse_date(it), it) for it in candidates if parse_date(it) is not None),
         key=lambda pair: pair[0],
     )
+    # 구글 항공편 검색처럼, 판단은 사람이 하도록 D+0~D+6에서 찾은 후보를 전부 날짜순으로 같이 내려준다
+    # (같은 편명이 매일 뜨는 노선이면 오늘 것/내일 것이 동시에 있을 수 있음).
+    all_candidates = [
+        {"date": d.isoformat(), "isToday": d == today, **with_times(it)}
+        for d, it in dated
+    ]
+
+    anchor_match = next((it for it in candidates if parse_date(it) == anchor), None)
+    if anchor_match:
+        item = with_times(anchor_match)
+        if anchor == today:
+            return {"found": True, "item": item, "allCandidates": all_candidates}
+        return {"found": False, "reason": "wrong_day", "dayDiff": (anchor - today).days, "item": item, "allCandidates": all_candidates}
+
     if dated:
         day, it = dated[0]
-        return {"found": False, "reason": "wrong_day", "dayDiff": (day - today).days, "item": with_times(it)}
-    return {"found": False, "reason": "notfound"}
+        return {"found": False, "reason": "wrong_day", "dayDiff": (day - today).days, "item": with_times(it), "allCandidates": all_candidates}
+    return {"found": False, "reason": "notfound", "allCandidates": all_candidates}
 
 PORT = 8000
 STATIC_DIR = Path(__file__).parent
