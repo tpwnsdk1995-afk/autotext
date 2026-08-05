@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote, unquote
@@ -54,20 +54,18 @@ def fetch_flight_items(service_key):
 def match_flight(items, flight_id, expected_date=None):
     """이미 받아온 items 목록에서 특정 편명의 도착 정보를 찾는다.
 
-    같은 편명이 매일 뜨는 노선이면 D+0~D+6 목록 안에 오늘 것과 내일 것이 동시에
-    들어있을 수 있다. expected_date(그 예약이 실제로 몇 일자인지, 리포트의 "일" 값)를
-    넘기면 그 날짜의 운항편을 먼저 찾아 고르고, 없으면(과거 방식과 동일하게) 오늘 날짜를
-    기준으로 찾는다.
+    expected_date(리포트의 "일" 값 = 출발일 기준으로 보는 기준일, 없으면 오늘)를 anchor로
+    삼아, 그 당일 도착하는 건을 먼저 찾는다. 자정을 넘겨 다음날 도착하는 노선이면
+    anchor+1일 도착 건을 찾아 "next_day"로 표시한다 (예: "내일 도착").
 
     reason 값:
     - (found=True인 경우 없음)
-    - "wrong_day": 편명은 찾았지만 오늘 도착편이 아님 (dayDiff = 오늘 기준 며칠 후인지)
-    - "notfound": 그 편명 자체가 D+0~D+6 목록에 아예 없음
+    - "next_day": anchor 당일이 아니라 그 다음날 도착편으로 찾음 (자정 넘긴 편)
+    - "notfound": 그 편명 자체가 anchor/anchor+1 도착편 목록에 없음
     """
     norm_target = str(flight_id).replace(" ", "").upper()
     target_core = _flight_core(norm_target)
-    today = datetime.now().date()
-    anchor = expected_date or today
+    anchor = expected_date or datetime.now().date()
 
     candidates = [
         item for item in items
@@ -76,7 +74,7 @@ def match_flight(items, flight_id, expected_date=None):
         )
     ]
     if not candidates:
-        return {"found": False, "reason": "notfound", "allCandidates": []}
+        return {"found": False, "reason": "notfound"}
 
     def parse_date(item):
         s = str(item.get("scheduleDateTime", ""))
@@ -91,28 +89,15 @@ def match_flight(items, flight_id, expected_date=None):
         item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
         return item
 
-    dated = sorted(
-        ((parse_date(it), it) for it in candidates if parse_date(it) is not None),
-        key=lambda pair: pair[0],
-    )
-    # 구글 항공편 검색처럼, 판단은 사람이 하도록 D+0~D+6에서 찾은 후보를 전부 날짜순으로 같이 내려준다
-    # (같은 편명이 매일 뜨는 노선이면 오늘 것/내일 것이 동시에 있을 수 있음).
-    all_candidates = [
-        {"date": d.isoformat(), "isToday": d == today, **with_times(it)}
-        for d, it in dated
-    ]
+    same_day = next((it for it in candidates if parse_date(it) == anchor), None)
+    if same_day:
+        return {"found": True, "item": with_times(same_day)}
 
-    anchor_match = next((it for it in candidates if parse_date(it) == anchor), None)
-    if anchor_match:
-        item = with_times(anchor_match)
-        if anchor == today:
-            return {"found": True, "item": item, "allCandidates": all_candidates}
-        return {"found": False, "reason": "wrong_day", "dayDiff": (anchor - today).days, "item": item, "allCandidates": all_candidates}
+    next_day = next((it for it in candidates if parse_date(it) == anchor + timedelta(days=1)), None)
+    if next_day:
+        return {"found": False, "reason": "next_day", "item": with_times(next_day)}
 
-    if dated:
-        day, it = dated[0]
-        return {"found": False, "reason": "wrong_day", "dayDiff": (day - today).days, "item": with_times(it), "allCandidates": all_candidates}
-    return {"found": False, "reason": "notfound", "allCandidates": all_candidates}
+    return {"found": False, "reason": "notfound"}
 
 PORT = 8000
 STATIC_DIR = Path(__file__).parent

@@ -283,7 +283,7 @@
       timeCell.appendChild(timeInput);
 
       const actualCell = document.createElement("td");
-      if (row.status === "wrong_day" || row.status === "notfound") {
+      if (row.status === "next_day" || row.status === "notfound") {
         actualCell.innerHTML = `<span class="badge-error">${actualTimeLabel(row)}</span>`;
       } else {
         actualCell.textContent = actualTimeLabel(row);
@@ -325,26 +325,10 @@
     els.countLabel.textContent = text;
   }
 
-  // 판단은 사람이 하도록, 그 편명이 D+0~D+6에서 뜬 날짜/시간 후보를 구글처럼 전부 나열
-  function candidateListLabel(row) {
-    if (!row.allCandidates || row.allCandidates.length === 0) return "";
-    return row.allCandidates
-      .map((c) => {
-        const [, mo, da] = c.date.split("-");
-        const t = c.estimatedTime || c.scheduleTime || "?";
-        return `${+mo}/${+da}${c.isToday ? "(오늘)" : ""} ${t}`;
-      })
-      .join(" · ");
-  }
-
   function actualTimeLabel(row) {
-    const list = candidateListLabel(row);
-    if (row.status === "ok") return list || row.actualTime || "";
-    if (row.status === "wrong_day") {
-      const label = row.dayDiff === 1 ? "내일반납" : `${row.dayDiff}일후반납`;
-      return list ? `${label} — ${list}` : label;
-    }
-    if (row.status === "notfound") return list || "조회불가";
+    if (row.status === "ok") return row.actualTime || "";
+    if (row.status === "next_day") return row.nextDayTime ? `내일 도착 (${row.nextDayTime})` : "내일 도착";
+    if (row.status === "notfound") return "조회불가";
     return row.type === "반납" ? "-" : "";
   }
 
@@ -656,15 +640,14 @@
       }
       for (const row of targets) {
         const result = data.results[row.flight];
-        row.allCandidates = result ? (result.allCandidates || []) : [];
         if (!result) {
           row.status = "notfound";
         } else if (result.found) {
           row.actualTime = result.item.estimatedTime || result.item.scheduleTime || "";
           row.status = row.actualTime ? "ok" : "notfound";
-        } else if (result.reason === "wrong_day") {
-          row.status = "wrong_day";
-          row.dayDiff = result.dayDiff;
+        } else if (result.reason === "next_day") {
+          row.status = "next_day";
+          row.nextDayTime = result.item ? (result.item.estimatedTime || result.item.scheduleTime || "") : "";
         } else {
           row.status = "notfound";
         }
