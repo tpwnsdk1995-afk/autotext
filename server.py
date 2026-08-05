@@ -522,6 +522,38 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": False, "error": str(e)})
             return
 
+        if parsed.path == "/api/flight-debug":
+            # 임시 디버그용: 특정 편명이 원본 API에 정확히 어떻게 찍혀있는지 그대로 보여준다
+            # (날짜/시간 판단 로직 없이 raw 데이터 그대로).
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "잘못된 요청 본문"})
+                return
+
+            service_key = str(data.get("serviceKey", ""))
+            flight_id = str(data.get("flightId", "")).strip().upper()
+            if not service_key or not flight_id:
+                self._send_json(400, {"ok": False, "error": "serviceKey/flightId가 필요합니다"})
+                return
+
+            try:
+                items = fetch_flight_items(service_key)
+                norm_target = flight_id.replace(" ", "")
+                target_core = _flight_core(norm_target)
+                raw_matches = [
+                    it for it in items
+                    if (lambda fid: fid == norm_target or _flight_core(fid) == target_core)(
+                        str(it.get("flightId", "")).replace(" ", "").upper()
+                    )
+                ]
+                self._send_json(200, {"ok": True, "count": len(raw_matches), "items": raw_matches})
+            except Exception as e:
+                self._send_json(200, {"ok": False, "error": str(e)})
+            return
+
         self.send_error(404)
 
     def _serve_file(self, name, content_type):

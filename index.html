@@ -60,6 +60,11 @@
   <button id="copyBtn">텍스트로 복사</button>
   <span id="lookupStatus" class="muted"></span>
 </div>
+<div class="row">
+  <input type="text" id="debugFlightId" placeholder="편명 (예: 7C2516) — 원본 데이터 디버그용" style="width:200px; padding:6px;">
+  <button id="debugFlightBtn">원본 데이터 보기</button>
+</div>
+<pre id="debugOutput" class="muted" style="white-space:pre-wrap; font-size:12px;"></pre>
 <div class="table-wrap">
 <table id="reportTable">
   <thead>
@@ -136,6 +141,9 @@
     extractStatus: document.getElementById("extractStatus"),
     countLabel: document.getElementById("countLabel"),
     lookupDate: document.getElementById("lookupDate"),
+    debugFlightId: document.getElementById("debugFlightId"),
+    debugFlightBtn: document.getElementById("debugFlightBtn"),
+    debugOutput: document.getElementById("debugOutput"),
     lookupAllBtn: document.getElementById("lookupAllBtn"),
     clearAllBtn: document.getElementById("clearAllBtn"),
     copyBtn: document.getElementById("copyBtn"),
@@ -659,6 +667,27 @@
       alert(`오류: ${e.message || e}`);
     } finally {
       els.lookupAllBtn.disabled = false;
+    }
+  });
+
+  els.debugFlightBtn.addEventListener("click", async () => {
+    const serviceKey = els.dataGoKrKey.value.trim();
+    const flightId = els.debugFlightId.value.trim();
+    if (!serviceKey || !flightId) {
+      alert("서비스키와 편명을 입력해주세요.");
+      return;
+    }
+    els.debugOutput.textContent = "조회 중...";
+    try {
+      const res = await fetch("/api/flight-debug", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serviceKey, flightId }),
+      });
+      const data = await res.json();
+      els.debugOutput.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+      els.debugOutput.textContent = `오류: ${e.message || e}`;
     }
   });
 
