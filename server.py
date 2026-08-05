@@ -85,21 +85,26 @@ def match_flight(items, flight_id, expected_date=None):
         except ValueError:
             return None
 
+    def with_times(item):
+        item = dict(item)
+        item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
+        item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
+        return item
+
     anchor_match = next((it for it in candidates if parse_date(it) == anchor), None)
     if anchor_match:
+        item = with_times(anchor_match)
         if anchor == today:
-            item = dict(anchor_match)
-            item["scheduleTime"] = format_hhmm(item.get("scheduleDateTime"))
-            item["estimatedTime"] = format_hhmm(item.get("estimatedDateTime"))
             return {"found": True, "item": item}
-        return {"found": False, "reason": "wrong_day", "dayDiff": (anchor - today).days}
+        return {"found": False, "reason": "wrong_day", "dayDiff": (anchor - today).days, "item": item}
 
     dated = sorted(
         ((parse_date(it), it) for it in candidates if parse_date(it) is not None),
         key=lambda pair: pair[0],
     )
     if dated:
-        return {"found": False, "reason": "wrong_day", "dayDiff": (dated[0][0] - today).days}
+        day, it = dated[0]
+        return {"found": False, "reason": "wrong_day", "dayDiff": (day - today).days, "item": with_times(it)}
     return {"found": False, "reason": "notfound"}
 
 PORT = 8000

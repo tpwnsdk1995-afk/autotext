@@ -327,7 +327,10 @@
 
   function actualTimeLabel(row) {
     if (row.status === "ok") return row.actualTime || "";
-    if (row.status === "wrong_day") return row.dayDiff === 1 ? "내일반납" : `${row.dayDiff}일후반납`;
+    if (row.status === "wrong_day") {
+      const label = row.dayDiff === 1 ? "내일반납" : `${row.dayDiff}일후반납`;
+      return row.futureTime ? `${label} (${row.futureTime})` : label;
+    }
     if (row.status === "notfound") return "조회불가";
     return row.type === "반납" ? "-" : "";
   }
@@ -648,6 +651,7 @@
         } else if (result.reason === "wrong_day") {
           row.status = "wrong_day";
           row.dayDiff = result.dayDiff;
+          row.futureTime = result.item ? (result.item.estimatedTime || result.item.scheduleTime || "") : "";
         } else {
           row.status = "notfound";
         }
