@@ -334,8 +334,9 @@
   }
 
   function actualTimeLabel(row) {
-    if (row.status === "ok") return row.actualTime || "";
-    if (row.status === "next_day") return row.nextDayTime ? `내일 도착 (${row.nextDayTime})` : "내일 도착";
+    const flightTag = row.flight ? `(${row.flight}) ` : "";
+    if (row.status === "ok") return row.actualTime ? `${flightTag}${row.actualTime}` : "";
+    if (row.status === "next_day") return row.nextDayTime ? `${flightTag}내일 도착 (${row.nextDayTime})` : "내일 도착";
     if (row.status === "notfound") return "조회불가";
     return row.type === "반납" ? "-" : "";
   }
