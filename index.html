@@ -731,13 +731,22 @@
     return out;
   }
 
-  async function sendToNumbers(targetRows) {
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  }
+  function markFailed(bucket, groups, why) {
+    for (const g of groups) for (const r of g) bucket.push({ ...r, why });
+  }
+
+  // oneByOne: 재시도 때는 1건씩 보낸다. 배치로 보내면 10건 중 1건만 문제여도
+  // 전부 실패로 찍혀서 어느 번호가 진짜 문제인지 알 수 없다.
+  async function sendToNumbers(targetRows, oneByOne) {
     const ip = els.ip.value.trim();
     const port = els.port.value.trim();
     const username = els.username.value;
     const password = els.password.value;
     const message = els.message.value;
-    const chunkSize = Math.max(1, parseInt(els.chunkSize.value, 10) || 10);
+    const chunkSize = oneByOne ? 1 : Math.max(1, parseInt(els.chunkSize.value, 10) || 10);
     const delayMs = Math.max(0, parseInt(els.delayMs.value, 10) || 0);
 
     if (!ip || !port || !username) {
@@ -759,6 +768,7 @@
     const chunks = chunk(targetRows, chunkSize);
     let success = 0;
     const failed = [];
+    let abortNote = "";
 
     for (let i = 0; i < chunks.length; i++) {
       const group = chunks[i];
@@ -776,21 +786,22 @@
         });
         data = await res.json();
       } catch (e) {
-        els.progress.textContent = "";
-        els.summary.innerHTML = `<span class="status-bad">프록시 서버 연결 실패 — 서버가 실행 중인지 확인하세요.</span>`;
-        els.sendBtn.disabled = false;
-        return;
+        markFailed(failed, chunks.slice(i), "프록시 서버 연결 끊김");
+        abortNote = "프록시 서버 연결 실패 — 서버가 실행 중인지 확인하세요. 이후 배치는 보내지 않았습니다.";
+        break;
       }
 
       if (data.ok) {
         success += group.length;
       } else if (data.status === 401) {
-        els.progress.textContent = "";
-        els.summary.innerHTML = `<span class="status-bad">인증 실패 — 아이디/비밀번호를 확인하세요. (이후 배치는 전송하지 않았습니다)</span>`;
-        els.sendBtn.disabled = false;
-        return;
+        markFailed(failed, chunks.slice(i), "인증 실패 (401)");
+        abortNote = "인증 실패 — 아이디/비밀번호를 확인하세요. 이후 배치는 보내지 않았습니다.";
+        break;
       } else {
-        failed.push(...group);
+        const why = data.detail
+          ? `${data.error} — ${String(data.detail).slice(0, 200)}`
+          : (data.error || "알 수 없는 오류");
+        markFailed(failed, [group], why);
       }
 
       if (i < chunks.length - 1 && delayMs > 0) await sleep(delayMs);
@@ -799,10 +810,14 @@
     els.progress.textContent = "";
     lastFailed = failed;
     const total = targetRows.length;
+    const reasons = [...new Set(failed.map((r) => r.why))];
     els.summary.innerHTML =
+      (abortNote ? `<span class="status-bad">${esc(abortNote)}</span>\n` : "") +
       `총 ${total}건 / 성공 ${success}건 / 실패 ${failed.length}건\n` +
       (failed.length
-        ? `실패 번호: ${failed.map((r) => r.phone).join(", ")}\n(게이트웨이 응답 수락 기준이며, 실제 수신 확인은 포함되지 않습니다)`
+        ? `실패 번호: ${esc(failed.map((r) => r.phone).join(", "))}\n` +
+          `실패 사유: ${esc(reasons.join(" / "))}\n` +
+          `(게이트웨이 응답 수락 기준이며, 실제 수신 확인은 포함되지 않습니다)`
         : `(게이트웨이 응답 수락 기준이며, 실제 수신 확인은 포함되지 않습니다)`);
     els.retryBtn.style.display = failed.length ? "inline-block" : "none";
     els.sendBtn.disabled = false;
@@ -814,7 +829,7 @@
   });
 
   els.retryBtn.addEventListener("click", () => {
-    sendToNumbers(lastFailed);
+    sendToNumbers(lastFailed, true);
   });
 
   render();
