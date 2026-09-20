@@ -110,10 +110,9 @@
   <span id="testResult"></span>
 </div>
 <details>
-  <summary>고급 설정 (청크 크기 / 지연시간)</summary>
+  <summary>고급 설정 (지연시간)</summary>
   <div class="settings-grid" style="margin-top:8px;">
-    <label for="chunkSize">청크 크기</label><input type="number" id="chunkSize" value="10" min="1">
-    <label for="delayMs">지연(ms)</label><input type="number" id="delayMs" value="3000" min="0" step="500">
+    <label for="delayMs">한 건 사이 지연(ms)</label><input type="number" id="delayMs" value="700" min="0" step="100">
   </div>
 </details>
 
@@ -160,7 +159,6 @@
     port: document.getElementById("port"),
     username: document.getElementById("username"),
     password: document.getElementById("password"),
-    chunkSize: document.getElementById("chunkSize"),
     delayMs: document.getElementById("delayMs"),
     testBtn: document.getElementById("testBtn"),
     testResult: document.getElementById("testResult"),
@@ -209,8 +207,8 @@
       if (s.port) els.port.value = s.port;
       if (s.username) els.username.value = s.username;
       if (s.password) els.password.value = s.password;
-      if (s.chunkSize) els.chunkSize.value = s.chunkSize;
-      if (s.delayMs !== undefined) els.delayMs.value = s.delayMs;
+      // delayMs2: 예전 저장값(묶음 발송 시절 3000ms)을 물려받지 않으려고 키를 바꿨다.
+      if (s.delayMs2 !== undefined) els.delayMs.value = s.delayMs2;
     } catch (e) { /* 무시 */ }
   }
 
@@ -222,12 +220,11 @@
       port: els.port.value.trim(),
       username: els.username.value,
       password: els.password.value,
-      chunkSize: els.chunkSize.value,
-      delayMs: els.delayMs.value,
+      delayMs2: els.delayMs.value,
     }));
   }
 
-  [els.apiKey, els.dataGoKrKey, els.ip, els.port, els.username, els.password, els.chunkSize, els.delayMs]
+  [els.apiKey, els.dataGoKrKey, els.ip, els.port, els.username, els.password, els.delayMs]
     .forEach((el) => el.addEventListener("input", saveSettings));
   loadSettings();
 
@@ -725,28 +722,22 @@
 
   // ---------- 발송 ----------
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-  function chunk(arr, size) {
-    const out = [];
-    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-    return out;
-  }
 
   function esc(s) {
     return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   }
-  function markFailed(bucket, groups, why) {
-    for (const g of groups) for (const r of g) bucket.push({ ...r, why });
+  function markFailed(bucket, rowsToMark, why) {
+    for (const r of rowsToMark) bucket.push({ ...r, why });
   }
 
-  // oneByOne: 재시도 때는 1건씩 보낸다. 배치로 보내면 10건 중 1건만 문제여도
-  // 전부 실패로 찍혀서 어느 번호가 진짜 문제인지 알 수 없다.
-  async function sendToNumbers(targetRows, oneByOne) {
+  // 항상 1명씩 보낸다. 묶어서 보내면 게이트웨이가 요청을 통째로 거부하므로
+  // 번호 하나가 이상해도 같이 묶인 사람 전원이 실패로 찍힌다.
+  async function sendToNumbers(targetRows) {
     const ip = els.ip.value.trim();
     const port = els.port.value.trim();
     const username = els.username.value;
     const password = els.password.value;
     const message = els.message.value;
-    const chunkSize = oneByOne ? 1 : Math.max(1, parseInt(els.chunkSize.value, 10) || 10);
     const delayMs = Math.max(0, parseInt(els.delayMs.value, 10) || 0);
 
     if (!ip || !port || !username) {
@@ -762,13 +753,13 @@
       return;
     }
 
-    function post(group) {
+    function post(row) {
       return fetch("/api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ip, port, username, password, message,
-          numbers: group.map((r) => r.digits),
+          numbers: [row.digits],
         }),
       }).then((r) => r.json());
     }
@@ -781,50 +772,35 @@
     els.sendBtn.disabled = true;
     els.retryBtn.style.display = "none";
     els.summary.textContent = "";
-    const chunks = chunk(targetRows, chunkSize);
     let success = 0;
     const failed = [];
     let abortNote = "";
 
-    for (let i = 0; i < chunks.length; i++) {
-      const group = chunks[i];
-      els.progress.textContent = `배치 ${i + 1}/${chunks.length} 전송 중... (성공 ${success}, 실패 ${failed.length})`;
+    for (let i = 0; i < targetRows.length; i++) {
+      const row = targetRows[i];
+      els.progress.textContent =
+        `${i + 1}/${targetRows.length} 전송 중... ${row.name || ""} ${row.phone} (성공 ${success}, 실패 ${failed.length})`;
 
       let data;
       try {
-        data = await post(group);
+        data = await post(row);
       } catch (e) {
-        markFailed(failed, chunks.slice(i), "프록시 서버 연결 끊김");
-        abortNote = "프록시 서버 연결 실패 — 서버가 실행 중인지 확인하세요. 이후 배치는 보내지 않았습니다.";
+        markFailed(failed, targetRows.slice(i), "프록시 서버 연결 끊김");
+        abortNote = "프록시 서버 연결 실패 — 서버가 실행 중인지 확인하세요. 이후 건은 보내지 않았습니다.";
         break;
       }
 
       if (data.ok) {
-        success += group.length;
+        success++;
       } else if (data.status === 401) {
-        markFailed(failed, chunks.slice(i), "인증 실패 (401)");
-        abortNote = "인증 실패 — 아이디/비밀번호를 확인하세요. 이후 배치는 보내지 않았습니다.";
+        markFailed(failed, targetRows.slice(i), "인증 실패 (401)");
+        abortNote = "인증 실패 — 아이디/비밀번호를 확인하세요. 이후 건은 보내지 않았습니다.";
         break;
-      } else if (data.status && group.length > 1) {
-        // 게이트웨이가 배치를 통째로 거부했다. 번호 하나가 이상해도 10건 전부 거부되므로
-        // 1건씩 다시 보내서 진짜 문제인 번호만 실패로 남긴다. 거부된 배치라 중복 발송 아님.
-        for (let k = 0; k < group.length; k++) {
-          const r = group[k];
-          els.progress.textContent = `배치 ${i + 1} 거부됨 → 1건씩 확인 중 ${k + 1}/${group.length} (${r.phone})`;
-          let one;
-          try {
-            one = await post([r]);
-          } catch (e) {
-            one = { ok: false, error: "프록시 서버 연결 끊김" };
-          }
-          if (one.ok) success++;
-          else markFailed(failed, [[r]], whyOf(one));
-        }
       } else {
-        markFailed(failed, [group], whyOf(data));
+        markFailed(failed, [row], whyOf(data));
       }
 
-      if (i < chunks.length - 1 && delayMs > 0) await sleep(delayMs);
+      if (i < targetRows.length - 1 && delayMs > 0) await sleep(delayMs);
     }
 
     els.progress.textContent = "";
@@ -849,7 +825,7 @@
   });
 
   els.retryBtn.addEventListener("click", () => {
-    sendToNumbers(lastFailed, true);
+    sendToNumbers(lastFailed);
   });
 
   render();
