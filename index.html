@@ -762,6 +762,22 @@
       return;
     }
 
+    function post(group) {
+      return fetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ip, port, username, password, message,
+          numbers: group.map((r) => r.digits),
+        }),
+      }).then((r) => r.json());
+    }
+    function whyOf(d) {
+      return d.detail
+        ? `${d.error} — ${String(d.detail).slice(0, 200)}`
+        : (d.error || "알 수 없는 오류");
+    }
+
     els.sendBtn.disabled = true;
     els.retryBtn.style.display = "none";
     els.summary.textContent = "";
@@ -774,17 +790,9 @@
       const group = chunks[i];
       els.progress.textContent = `배치 ${i + 1}/${chunks.length} 전송 중... (성공 ${success}, 실패 ${failed.length})`;
 
-      let res, data;
+      let data;
       try {
-        res = await fetch("/api/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ip, port, username, password, message,
-            numbers: group.map((r) => r.digits),
-          }),
-        });
-        data = await res.json();
+        data = await post(group);
       } catch (e) {
         markFailed(failed, chunks.slice(i), "프록시 서버 연결 끊김");
         abortNote = "프록시 서버 연결 실패 — 서버가 실행 중인지 확인하세요. 이후 배치는 보내지 않았습니다.";
@@ -797,11 +805,23 @@
         markFailed(failed, chunks.slice(i), "인증 실패 (401)");
         abortNote = "인증 실패 — 아이디/비밀번호를 확인하세요. 이후 배치는 보내지 않았습니다.";
         break;
+      } else if (data.status && group.length > 1) {
+        // 게이트웨이가 배치를 통째로 거부했다. 번호 하나가 이상해도 10건 전부 거부되므로
+        // 1건씩 다시 보내서 진짜 문제인 번호만 실패로 남긴다. 거부된 배치라 중복 발송 아님.
+        for (let k = 0; k < group.length; k++) {
+          const r = group[k];
+          els.progress.textContent = `배치 ${i + 1} 거부됨 → 1건씩 확인 중 ${k + 1}/${group.length} (${r.phone})`;
+          let one;
+          try {
+            one = await post([r]);
+          } catch (e) {
+            one = { ok: false, error: "프록시 서버 연결 끊김" };
+          }
+          if (one.ok) success++;
+          else markFailed(failed, [[r]], whyOf(one));
+        }
       } else {
-        const why = data.detail
-          ? `${data.error} — ${String(data.detail).slice(0, 200)}`
-          : (data.error || "알 수 없는 오류");
-        markFailed(failed, [group], why);
+        markFailed(failed, [group], whyOf(data));
       }
 
       if (i < chunks.length - 1 && delayMs > 0) await sleep(delayMs);
@@ -813,7 +833,7 @@
     const reasons = [...new Set(failed.map((r) => r.why))];
     els.summary.innerHTML =
       (abortNote ? `<span class="status-bad">${esc(abortNote)}</span>\n` : "") +
-      `총 ${total}건 / 성공 ${success}건 / 실패 ${failed.length}건\n` +
+      `[${new Date().toLocaleTimeString("ko-KR")} 완료] 총 ${total}건 / 성공 ${success}건 / 실패 ${failed.length}건\n` +
       (failed.length
         ? `실패 번호: ${esc(failed.map((r) => r.phone).join(", "))}\n` +
           `실패 사유: ${esc(reasons.join(" / "))}\n` +
